@@ -8,7 +8,7 @@ A native macOS shell (Swift + WKWebView) for the **DeepSeek Harness (DSH)** weba
 
 - **Native tab bar** with user-named tabs and Liquid Glass styling (macOS 26+)
 - **Reasoning effort rail** — Off / High / Max slider injected into the composer, wired to the model's reasoning-effort setting
-- **Founder-morph theme** (v3.1) — the background persona transforms with effort level: suited figure in fog (Off) → mandarin-collar jacket (High) → black-and-gold imperial robe (Max), with a 620ms crossfade. Toggle in **Settings → Show founder morph**
+- **Founder-morph theme** (v3.1) — the background persona transforms with effort level: suited figure in fog (Off) → mandarin-collar jacket (High) → black-and-gold imperial robe (Max), with a 620ms crossfade. Toggle in **View → Show Founder Morph** (⌘⇧F) or **Settings → Show founder morph**; applies live, persists across relaunch
 - All injection is done via an audited user script (`Resources/EffortControl.js`) with a bounded DOM fixture test suite
 
 ## Install
@@ -35,6 +35,7 @@ open ".build/DSH Shell.app"
 
 ## Version history
 
+- **3.1.1** — fix: founder hero faces anchored per level (Off/High top-anchored, Max centered); effort-flake fix (retrying native effort apply); View → Show Founder Morph menu item (⌘⇧F)
 - **3.1** — founder-morph theme + Settings toggle; fix: hero target resolves to the live composer stage (`.wSkVaW_composerSeat`) instead of a 266×56 control strip when no `<main>` landmark exists
 - **3.0** — minimalist redesign: native tabs, user-named sessions, chrome folded into Settings
 - **2.0** — effort dial (Off/High/Max) rail + founder hero

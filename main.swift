@@ -142,6 +142,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     var settingsWindow: NSWindow?
     var profileRows: [(name: NSTextField, url: NSTextField)] = []
     var defaultProfilePopup: NSPopUpButton?
+    var founderMenuItem: NSMenuItem?
 
     // MARK: lifecycle
 
@@ -211,6 +212,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
         editItem.submenu = editMenu
         mainMenu.addItem(editItem)
+
+        let viewItem = NSMenuItem()
+        let viewMenu = NSMenu(title: "View")
+        let founderItem = viewMenu.addItem(withTitle: "Show Founder Morph", action: #selector(toggleFounderThemeMenuAction(_:)), keyEquivalent: "f")
+        founderItem.keyEquivalentModifierMask = [.command, .shift]
+        founderItem.state = (UserDefaults.standard.object(forKey: EffortControlScript.founderThemeDefaultsKey) as? Bool ?? true) ? .on : .off
+        viewItem.submenu = viewMenu
+        mainMenu.addItem(viewItem)
+        founderMenuItem = founderItem
 
         let winItem = NSMenuItem()
         let winMenu = NSMenu(title: "Window")
@@ -622,6 +632,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
 
     @objc func founderThemeToggled(_ sender: NSButton) {
         let enabled = sender.state == .on
+        UserDefaults.standard.set(enabled, forKey: EffortControlScript.founderThemeDefaultsKey)
+        founderMenuItem?.state = enabled ? .on : .off
+        for record in tabs {
+            record.webView.evaluateJavaScript("window.__DSH_EFFORT_CONTROL__ && window.__DSH_EFFORT_CONTROL__.setFounderTheme ? window.__DSH_EFFORT_CONTROL__.setFounderTheme(\(enabled)) : undefined") { _, _ in }
+        }
+    }
+
+    @objc func toggleFounderThemeMenuAction(_ sender: NSMenuItem) {
+        let enabled = (sender.state != .on)
+        sender.state = enabled ? .on : .off
         UserDefaults.standard.set(enabled, forKey: EffortControlScript.founderThemeDefaultsKey)
         for record in tabs {
             record.webView.evaluateJavaScript("window.__DSH_EFFORT_CONTROL__ && window.__DSH_EFFORT_CONTROL__.setFounderTheme ? window.__DSH_EFFORT_CONTROL__.setFounderTheme(\(enabled)) : undefined") { _, _ in }

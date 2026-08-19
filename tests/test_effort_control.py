@@ -115,13 +115,33 @@ def run(script_path: Path) -> None:
         assert page.locator("#stale-marker[data-dsh-effort-hero]").count() == 0
         page.wait_for_function("Array.from(document.querySelectorAll('.dsh-effort-founder-layer')).some(layer => layer.style.backgroundImage.includes('data:image/png'))")
 
+        # v3.1.1 face-retention contract: each level anchors its portrait so the
+        # face survives the wide, shallow hero crop (regression for the
+        # Off/High face-cutoff Henry reported 2026-08-19). The crossfade keeps
+        # a stale data-dsh-level on the fading layer, so assert on the visible one.
+        def layer_position(level_label: str) -> list[str]:
+            return page.evaluate(
+                """(label) => {
+                    const layers = Array.from(document.querySelectorAll(
+                        `.dsh-effort-founder-layer[data-dsh-level="${label}"]`));
+                    const visible = layers.find((layer) => layer.style.opacity === "1") || layers[0];
+                    const style = getComputedStyle(visible);
+                    return [style.backgroundPositionX.trim(), style.backgroundPositionY.trim()];
+                }""",
+                level_label,
+            )
+
+        assert layer_position("Off") == ["50%", "14%"]
+
         effort_input.focus()
         effort_input.press("ArrowRight")
         page.wait_for_function("document.querySelector('#model-trigger').getAttribute('aria-label').endsWith('High')")
+        assert layer_position("High") == ["50%", "14%"]
         assert effort_input.get_attribute("aria-valuetext") == "High"
 
         effort_input.press("ArrowRight")
         page.wait_for_function("document.querySelector('#model-trigger').getAttribute('aria-label').endsWith('Max')")
+        assert layer_position("Max") == ["50%", "31%"]
         assert effort_input.get_attribute("aria-valuetext") == "Max"
         assert page.locator('.dsh-effort-control').evaluate("element => getComputedStyle(element).getPropertyValue('--dsh-effort-accent').trim()") == "#c69b3c"
 

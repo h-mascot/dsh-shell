@@ -235,6 +235,17 @@
         opacity: 0;
         transition: opacity 620ms ease;
       }
+      /* The live hero is wide and shallow. Source portraits put the face high
+         (eyes ~19-20% from top for Off/High, ~31% for Max), so vertical
+         centering crops it. Anchor Off/High to the top edge and keep Max
+         centered (its source is wider, so centering already shows the face). */
+      .dsh-effort-hero-host > .dsh-effort-founder-layer[data-dsh-level="Off"],
+      .dsh-effort-hero-host > .dsh-effort-founder-layer[data-dsh-level="High"] {
+        background-position: center 14%;
+      }
+      .dsh-effort-hero-host > .dsh-effort-founder-layer[data-dsh-level="Max"] {
+        background-position: center 31%;
+      }
       .dsh-effort-hero-host > :not(.dsh-effort-founder-layer) {
         position: relative;
         z-index: 1;
@@ -411,6 +422,7 @@
     });
     if (level !== null && !unavailable) {
       founderLayers[0].style.backgroundImage = `url("${FOUNDER_IMAGES[LEVELS[level]]}")`;
+      founderLayers[0].setAttribute("data-dsh-level", LEVELS[level]);
     }
     founderLayers[0].style.opacity = "1";
     founderLayers[1].style.opacity = "0";
@@ -445,6 +457,7 @@
     const next = visibleFounderLayer === 0 ? 1 : 0;
     const renderToken = ++founderRenderToken;
     founderLayers[next].style.backgroundImage = `url("${image}")`;
+    founderLayers[next].setAttribute("data-dsh-level", LEVELS[level]);
     renderedFounderLevel = level;
     window.requestAnimationFrame(() => {
       if (!hero || !founderLayers.length || renderToken !== founderRenderToken) return;
@@ -544,6 +557,24 @@
     await waitFor(() => readNativeLevel(trigger) === label);
   }
 
+  async function applyNativeEffortWithRetry(label) {
+    // Menus animate in live DSH and the event loop can stall briefly; a single
+    // 1500ms pass gave up permanently (observed as stuck-unavailable under
+    // load). Re-clicking the trigger toggles any half-open menu closed, so
+    // retries are self-cleaning and idempotent.
+    let lastError = null;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        await selectNativeEffort(label);
+        return;
+      } catch (error) {
+        lastError = error;
+        await new Promise((resolve) => window.setTimeout(resolve, 240));
+      }
+    }
+    throw lastError;
+  }
+
   function scheduleApply() {
     if (level === null) return;
     desiredLevel = LEVELS[level];
@@ -558,7 +589,7 @@
     const previous = confirmedLevel;
     applying = true;
     try {
-      await selectNativeEffort(requested);
+      await applyNativeEffortWithRetry(requested);
       confirmedLevel = requested;
       level = LEVELS.indexOf(requested);
       unavailable = false;
