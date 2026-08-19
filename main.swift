@@ -498,7 +498,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     // MARK: Settings window
 
     @objc func openSettingsAction(_ sender: Any?) {
-        NSLog("DSHV3 settings action fired")
         if let sw = settingsWindow {
             sw.makeKeyAndOrderFront(nil)
             return
@@ -543,6 +542,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         defaultRow.orientation = .horizontal
         defaultRow.spacing = 8
 
+        // Founder theme toggle: reasoning-effort background imagery (Off=suit,
+        // High=mandarin jacket, Max=imperial robe) behind the new-session hero.
+        let founderLabel = NSTextField(labelWithString: "Effort background theme:")
+        let founderToggle = NSButton(checkboxWithTitle: "Show founder morph", target: self, action: #selector(founderThemeToggled(_:)))
+        founderToggle.state = (UserDefaults.standard.object(forKey: EffortControlScript.founderThemeDefaultsKey) as? Bool ?? true) ? .on : .off
+        let founderHint = NSTextField(labelWithString: "Background follows reasoning effort: suit → jacket → imperial robe")
+        founderHint.font = .systemFont(ofSize: 10)
+        founderHint.textColor = .secondaryLabelColor
+        let founderRow = NSStackView(views: [founderLabel, founderToggle, founderHint])
+        founderRow.orientation = .horizontal
+        founderRow.spacing = 8
+
         let addButton = NSButton(title: "+ Add Environment", target: self, action: #selector(addProfileRow(_:)))
         let saveButton = NSButton(title: "Save", target: self, action: #selector(saveProfilesAction(_:)))
         saveButton.keyEquivalent = "\r"
@@ -569,6 +580,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         ])
 
         stack.addArrangedSubview(defaultRow)
+        stack.addArrangedSubview(founderRow)
+        stack.addArrangedSubview(makeSeparator())
 
         w.contentView = content
         self.settingsWindow = w
@@ -605,6 +618,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         let sep = NSBox()
         sep.boxType = .separator
         return sep
+    }
+
+    @objc func founderThemeToggled(_ sender: NSButton) {
+        let enabled = sender.state == .on
+        UserDefaults.standard.set(enabled, forKey: EffortControlScript.founderThemeDefaultsKey)
+        for record in tabs {
+            record.webView.evaluateJavaScript("window.__DSH_EFFORT_CONTROL__ && window.__DSH_EFFORT_CONTROL__.setFounderTheme ? window.__DSH_EFFORT_CONTROL__.setFounderTheme(\(enabled)) : undefined") { _, _ in }
+        }
     }
 
     @objc func addProfileRow(_ sender: Any?) {

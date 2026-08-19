@@ -11,6 +11,9 @@
     High: "__DSH_FOUNDER_HIGH_DATA_URI__",
     Max: "__DSH_FOUNDER_MAX_DATA_URI__",
   };
+  // Baked in at script-build time from UserDefaults "founderThemeEnabled";
+  // updated live via window.__DSH_EFFORT_CONTROL__.setFounderTheme(enabled).
+  let founderEnabled = __DSH_FOUNDER_THEME_ENABLED__;
   const STYLE_ID = "dsh-effort-control-style";
   const SLOT_SELECTOR = '[data-slot="conversation.input.right"]';
   const MODEL_SELECTOR = 'button[aria-label^="Select model"]';
@@ -99,7 +102,10 @@
     const pathname = window.location.pathname || "/";
     const looksLikeNewSession = pathname === "/" || pathname === "/new" || /new-session/i.test(pathname);
     if (looksLikeNewSession) {
-      return slot.closest('main, [role="main"]') || slot.parentElement;
+      // Live DSH has no <main> around the composer; the stage that holds the
+      // hero heading + composer is .wSkVaW_composerSeat. Keep main/role=main
+      // first for the fixture and future DSH versions that add landmarks.
+      return slot.closest('main, [role="main"], .wSkVaW_composerSeat') || slot.parentElement;
     }
     return null;
   }
@@ -449,10 +455,23 @@
   }
 
   function updateHero(slot) {
-    const target = findHeroTarget(slot);
+    const target = founderEnabled ? findHeroTarget(slot) : null;
+    if (!target) {
+      removeFounderTreatment();
+      return;
+    }
     addFounderTreatment(target);
     if (!hero) return;
     renderFounder();
+  }
+
+  function setFounderTheme(enabled) {
+    founderEnabled = Boolean(enabled);
+    if (!founderEnabled) {
+      removeFounderTreatment();
+    } else {
+      updateHero(mountedSlot || document.querySelector(SLOT_SELECTOR));
+    }
   }
 
   function exactEffortMenu() {
@@ -609,6 +628,6 @@
     attributeFilter: ["aria-label", "data-dsh-view", "data-page", "data-view", "data-testid", "data-conversation-id", "data-message-id"],
   });
   interval = window.setInterval(reconcile, 700);
-  window.__DSH_EFFORT_CONTROL__ = { destroy };
+  window.__DSH_EFFORT_CONTROL__ = { destroy, setFounderTheme };
   reconcile();
 })();

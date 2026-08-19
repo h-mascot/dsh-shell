@@ -15,6 +15,7 @@ ONE_PIXEL_PNG = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1H
 
 def run(script_path: Path) -> None:
     script = script_path.read_text(encoding="utf-8")
+    script = script.replace("__DSH_FOUNDER_THEME_ENABLED__", "true")
     placeholders = (
         "__DSH_FOUNDER_OFF_DATA_URI__",
         "__DSH_FOUNDER_HIGH_DATA_URI__",
@@ -143,6 +144,17 @@ def run(script_path: Path) -> None:
         body_classes = (page.locator("body").get_attribute("class") or "").split()
         assert "light" in body_classes
         assert "dark" not in body_classes
+
+        # v3.1 founder-theme toggle contract: off removes the hero layer, on restores it.
+        page.wait_for_function("window.__DSH_EFFORT_CONTROL__ && typeof window.__DSH_EFFORT_CONTROL__.setFounderTheme === 'function'")
+        page.evaluate("window.__DSH_EFFORT_CONTROL__.setFounderTheme(false)")
+        page.wait_for_function("document.querySelector('[data-dsh-effort-hero]') === null")
+        assert page.locator(".dsh-effort-founder-layer").count() == 0
+        page.locator("main").evaluate("element => element.removeAttribute('data-message-id')")
+        page.locator("main").evaluate("element => element.setAttribute('data-dsh-view', 'new-session')")
+        page.evaluate("window.__DSH_EFFORT_CONTROL__.setFounderTheme(true)")
+        page.wait_for_function("document.querySelector('[data-dsh-effort-hero]') !== null")
+        assert page.locator(".dsh-effort-founder-layer").count() == 2
         assert not errors, errors
         browser.close()
 
