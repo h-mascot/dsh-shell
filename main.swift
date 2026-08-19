@@ -1,7 +1,44 @@
 import Cocoa
 import WebKit
 
-// MARK: - Profile store
+// MARK: - Version
+
+let kShellVersion = "3.0"
+
+// MARK: - Tab state (v3: names persist)
+
+struct SavedTab: Codable {
+    var name: String?
+    var url: String
+}
+
+final class TabStateStore {
+    static let shared = TabStateStore()
+    private let fileURL: URL
+
+    init() {
+        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("DSH Shell", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        fileURL = dir.appendingPathComponent("tabs-v3.json")
+    }
+
+    func load() -> [SavedTab] {
+        guard let data = try? Data(contentsOf: fileURL),
+              let decoded = try? JSONDecoder().decode([SavedTab].self, from: data),
+              !decoded.isEmpty
+        else { return [] }
+        return decoded
+    }
+
+    func save(_ tabs: [SavedTab]) {
+        if let data = try? JSONEncoder().encode(tabs) {
+            try? data.write(to: fileURL, options: .atomic)
+        }
+    }
+}
+
+// MARK: - Environment profiles (Settings-only in v3)
 
 struct Profile: Codable, Equatable {
     var name: String
@@ -11,11 +48,6 @@ struct Profile: Codable, Equatable {
 final class ProfileStore {
     static let shared = ProfileStore()
     private(set) var profiles: [Profile] = []
-
-    func replace(with newProfiles: [Profile]) {
-        profiles = newProfiles
-        save()
-    }
     let fileURL: URL
 
     init() {
@@ -24,6 +56,11 @@ final class ProfileStore {
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         fileURL = dir.appendingPathComponent("profiles.json")
         load()
+    }
+
+    func replace(with newProfiles: [Profile]) {
+        profiles = newProfiles
+        save()
     }
 
     func load() {
@@ -51,50 +88,98 @@ final class ProfileStore {
         guard let p = profiles.first(where: { $0.name == name }) else { return nil }
         return URL(string: p.url)
     }
+
+    func profile(matchingOriginOf url: URL?) -> Profile? {
+        guard let url else { return nil }
+        return profiles.first { p in
+            guard let purl = URL(string: p.url) else { return false }
+            return AppDelegate.sameOrigin(purl, url)
+        }
+    }
 }
 
-// MARK: - Tab record
+// MARK: - Tab record (one window per tab, native tab group)
 
-final class TabRecord {
+final class TabRecord: NSObject {
+    let id = UUID()
+    let window: NSWindow
     let webView: WKWebView
-    let tabItem: NSTabViewItem
+    var customName: String?
     var observationTokens: [NSKeyValueObservation] = []
 
-    init(webView: WKWebView, tabItem: NSTabViewItem) {
+    init(window: NSWindow, webView: WKWebView) {
+        self.window = window
         self.webView = webView
-        self.tabItem = tabItem
+        super.init()
+    }
+
+    var displayName: String {
+        let custom = customName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !custom.isEmpty { return custom }
+        return TabRecord.fallbackLabel(for: webView.url)
+    }
+
+    static func fallbackLabel(for url: URL?) -> String {
+        guard let url else { return "New Tab" }
+        if let p = ProfileStore.shared.profile(matchingOriginOf: url) {
+            return p.name
+        }
+        return url.host ?? url.absoluteString
+    }
+
+    func refreshTitle() {
+        window.title = displayName
     }
 }
 
 // MARK: - App delegate
 
-final class AppDelegate: NSObject, NSApplicationDelegate, NSToolbarDelegate, NSTabViewDelegate, WKNavigationDelegate, WKUIDelegate {
-    var window: NSWindow!
-    var tabView: NSTabView!
-    var profilePopup: NSPopUpButton!
-    var addressField: NSTextField!
+final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate, NSWindowDelegate {
     var tabs: [TabRecord] = []
-    var selectedProfileIndex: Int = 0
-    var suppressTabSelect = false
+    var suppressSave = false
+    let tabbingIdentifier = "ai.heraldlabs.dsh-shell.tab"
 
-    let profilesMenuIdentifier = NSToolbarItem.Identifier("dsh.profiles")
-    let addressIdentifier = NSToolbarItem.Identifier("dsh.address")
-    let addTabIdentifier = NSToolbarItem.Identifier("dsh.addTab")
-    let closeTabIdentifier = NSToolbarItem.Identifier("dsh.closeTab")
+    var settingsWindow: NSWindow?
+    var profileRows: [(name: NSTextField, url: NSTextField)] = []
+    var defaultProfilePopup: NSPopUpButton?
 
-    var currentTab: TabRecord? {
-        let idx = tabView.indexOfTabViewItem(tabView.selectedTabViewItem ?? NSTabViewItem())
-        guard idx != NSNotFound, idx < tabs.count else { return nil }
-        return tabs[idx]
+    // MARK: lifecycle
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        buildMenu()
+        restoreState()
+        if let key = tabs.first?.window {
+            key.makeKeyAndOrderFront(nil)
+            for other in tabs.dropFirst() {
+                key.addTabbedWindow(other.window, ordered: .above)
+            }
+            if let activeId = UserDefaults.standard.string(forKey: "activeTabIdV3"),
+               let active = tabs.first(where: { $0.id.uuidString == activeId }) {
+                active.window.makeKeyAndOrderFront(nil)
+            }
+        }
+        NSApp.activate(ignoringOtherApps: true)
     }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        // Settings window closing should never quit; only the last tab does.
+        tabs.isEmpty && settingsWindow == nil
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        saveState()
+    }
+
+    // MARK: menu (platform conventions; tab navigation items are native)
 
     func buildMenu() {
         let mainMenu = NSMenu()
 
-        // App menu
         let appItem = NSMenuItem()
         let appMenu = NSMenu()
         appMenu.addItem(withTitle: "About DSH Shell", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        appMenu.addItem(NSMenuItem.separator())
+        appMenu.addItem(withTitle: "Settings…", action: #selector(openSettingsAction(_:)), keyEquivalent: ",")
         appMenu.addItem(NSMenuItem.separator())
         appMenu.addItem(withTitle: "Hide DSH Shell", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         let hideOthers = appMenu.addItem(withTitle: "Hide Others", action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h")
@@ -105,17 +190,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSToolbarDelegate, NST
         appItem.submenu = appMenu
         mainMenu.addItem(appItem)
 
-        // File menu
         let fileItem = NSMenuItem()
         let fileMenu = NSMenu(title: "File")
         fileMenu.addItem(withTitle: "New Tab", action: #selector(newTabAction(_:)), keyEquivalent: "t")
-        fileMenu.addItem(withTitle: "Close Tab", action: #selector(closeTabAction(_:)), keyEquivalent: "w")
+        fileMenu.addItem(withTitle: "Open Location…", action: #selector(openLocationAction(_:)), keyEquivalent: "l")
         fileMenu.addItem(NSMenuItem.separator())
-        fileMenu.addItem(withTitle: "Manage Profiles…", action: #selector(manageProfilesAction(_:)), keyEquivalent: ",")
+        fileMenu.addItem(withTitle: "Close Tab", action: #selector(closeTabAction(_:)), keyEquivalent: "w")
         fileItem.submenu = fileMenu
         mainMenu.addItem(fileItem)
 
-        // Edit menu (required for copy/paste inside WKWebView)
         let editItem = NSMenuItem()
         let editMenu = NSMenu(title: "Edit")
         editMenu.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
@@ -129,158 +212,106 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSToolbarDelegate, NST
         editItem.submenu = editMenu
         mainMenu.addItem(editItem)
 
-        // Window menu
         let winItem = NSMenuItem()
         let winMenu = NSMenu(title: "Window")
         winMenu.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
         winMenu.addItem(withTitle: "Zoom", action: #selector(NSWindow.performZoom(_:)), keyEquivalent: "")
+        winMenu.addItem(NSMenuItem.separator())
+        winMenu.addItem(withTitle: "Rename Tab…", action: #selector(renameTabAction(_:)), keyEquivalent: "r")
+        winMenu.addItem(NSMenuItem.separator())
+        for i in 1...9 {
+            let item = winMenu.addItem(withTitle: "Select Tab \(i)", action: #selector(selectTabByIndexAction(_:)), keyEquivalent: String(i))
+            item.tag = i
+        }
         winItem.submenu = winMenu
         mainMenu.addItem(winItem)
         NSApp.windowsMenu = winMenu
+        // AppKit appends native tab navigation (Show Next/Previous Tab,
+        // Move Tab to New Window, Select Tab 1-9) to the Window menu.
 
         NSApp.mainMenu = mainMenu
     }
 
-    func applicationDidFinishLaunching(_ notification: Notification) {
-        selectedProfileIndex = UserDefaults.standard.integer(forKey: "selectedProfileIndex")
-        if selectedProfileIndex < 0 || selectedProfileIndex >= ProfileStore.shared.profiles.count {
-            selectedProfileIndex = 0
-        }
+    // MARK: tabs
 
-        window = NSWindow(
+    var currentTab: TabRecord? {
+        tabs.first { $0.window.isKeyWindow }
+            ?? tabs.first { $0.window === NSApp.mainWindow }
+            ?? tabs.first
+    }
+
+    @objc func newTabAction(_ sender: Any?) {
+        _ = addTab(url: urlForNewTab(), name: nil, select: true)
+    }
+
+    func urlForNewTab() -> URL? {
+        if let current = currentTab?.webView.url {
+            if let profile = ProfileStore.shared.profile(matchingOriginOf: current) {
+                return URL(string: profile.url)
+            }
+            var comps = URLComponents(url: current, resolvingAgainstBaseURL: false)
+            comps?.path = "/"
+            return comps?.url
+        }
+        let defaultName = UserDefaults.standard.string(forKey: "defaultNewTabProfile") ?? ProfileStore.shared.profiles.first?.name
+        return ProfileStore.shared.url(forProfileNamed: defaultName ?? "")
+    }
+
+    @discardableResult
+    func addTab(url: URL?, name: String?, select: Bool) -> TabRecord {
+        let config = WKWebViewConfiguration()
+        config.websiteDataStore = .default()
+        if let effortScript = EffortControlScript.makeUserScript() {
+            config.userContentController.addUserScript(effortScript)
+        }
+        let webView = WKWebView(frame: NSRect(x: 0, y: 0, width: 1280, height: 820), configuration: config)
+        webView.autoresizingMask = [.width, .height]
+        webView.navigationDelegate = self
+        webView.uiDelegate = self
+        webView.allowsBackForwardNavigationGestures = true
+        webView.configuration.preferences.isElementFullscreenEnabled = true
+
+        let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1280, height: 860),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered, defer: false
         )
-        window.title = "DSH Shell"
-        window.minSize = NSSize(width: 640, height: 420)
-        window.center()
-
-        tabView = NSTabView(frame: NSRect(x: 0, y: 0, width: 1280, height: 860))
-        tabView.tabViewType = .topTabsBezelBorder
-        tabView.delegate = self
-        tabView.autoresizingMask = [.width, .height]
-        window.contentView = tabView
-
-        // Toolbar
-        let toolbar = NSToolbar(identifier: "main")
-        toolbar.delegate = self
-        toolbar.allowsUserCustomization = false
-        toolbar.displayMode = .iconAndLabel
-        window.toolbar = toolbar
-
-        buildMenu()
-
-        restoreState()
-
-        window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
-    }
-
-    // MARK: Toolbar delegate
-
-    func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [profilesMenuIdentifier, addressIdentifier, .flexibleSpace, addTabIdentifier, closeTabIdentifier]
-    }
-
-    func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        toolbarDefaultItemIdentifiers(toolbar)
-    }
-
-    func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier identifier: NSToolbarItem.Identifier, willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
-        switch identifier {
-        case profilesMenuIdentifier:
-            let item = NSToolbarItem(itemIdentifier: identifier)
-            item.label = "Environment"
-            let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 230, height: 26), pullsDown: false)
-            popup.target = self
-            popup.action = #selector(profileChanged(_:))
-            self.profilePopup = popup
-            item.view = popup
-            item.minSize = NSSize(width: 160, height: 26)
-            item.maxSize = NSSize(width: 320, height: 30)
-            rebuildProfilePopup()
-            return item
-        case addressIdentifier:
-            let item = NSToolbarItem(itemIdentifier: identifier)
-            item.label = "Address"
-            let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 460, height: 24))
-            field.placeholderString = "https://…"
-            field.bezelStyle = .roundedBezel
-            field.target = self
-            field.action = #selector(addressEntered(_:))
-            self.addressField = field
-            item.view = field
-            item.minSize = NSSize(width: 200, height: 24)
-            item.maxSize = NSSize(width: 900, height: 28)
-            return item
-        case addTabIdentifier:
-            let item = NSToolbarItem(itemIdentifier: identifier)
-            item.label = "New Tab"
-            item.paletteLabel = "New Tab"
-            item.image = NSImage(systemSymbolName: "plus", accessibilityDescription: "New tab")
-            item.target = self
-            item.action = #selector(newTabAction(_:))
-            return item
-        case closeTabIdentifier:
-            let item = NSToolbarItem(itemIdentifier: identifier)
-            item.label = "Close Tab"
-            item.paletteLabel = "Close Tab"
-            item.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Close tab")
-            item.target = self
-            item.action = #selector(closeTabAction(_:))
-            return item
-        default:
-            return nil
+        window.minSize = NSSize(width: 480, height: 360)
+        window.tabbingMode = .preferred
+        window.tabbingIdentifier = tabbingIdentifier
+        window.isRestorable = false
+        window.delegate = self
+        window.contentView = webView
+        if let frame = savedFrame() {
+            window.setFrame(frame, display: false)
+        } else {
+            window.center()
         }
-    }
 
-    // MARK: Profile popup
+        let record = TabRecord(window: window, webView: webView)
+        record.customName = name
+        tabs.append(record)
 
-    func rebuildProfilePopup() {
-        guard let popup = profilePopup else { return }
-        popup.removeAllItems()
-        popup.addItems(withTitles: ProfileStore.shared.profiles.map { $0.name })
-        if selectedProfileIndex < popup.numberOfItems {
-            popup.selectItem(at: selectedProfileIndex)
-        }
-    }
-
-    @objc func profileChanged(_ sender: NSPopUpButton) {
-        selectedProfileIndex = sender.indexOfSelectedItem
-        UserDefaults.standard.set(selectedProfileIndex, forKey: "selectedProfileIndex")
-        if let tab = currentTab, let url = currentProfileURL() {
-            tab.webView.load(URLRequest(url: url))
-        }
-    }
-
-    func currentProfileURL() -> URL? {
-        let profiles = ProfileStore.shared.profiles
-        guard selectedProfileIndex >= 0, selectedProfileIndex < profiles.count else { return nil }
-        return URL(string: profiles[selectedProfileIndex].url)
-    }
-
-    // MARK: Address bar
-
-    @objc func addressEntered(_ sender: NSTextField) {
-        guard let tab = currentTab else { return }
-        var text = sender.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        if text.isEmpty { return }
-        if !text.contains("://") {
-            if text.contains(" ") || !text.contains(".") {
-                return // don't guess search; harness UIs are URLs
+        record.observationTokens.append(webView.observe(\.url, options: [.new, .initial]) { [weak self] wv, _ in
+            DispatchQueue.main.async {
+                record.refreshTitle()
+                self?.saveState()
             }
-            text = "http://" + text
+        })
+
+        if let url {
+            webView.load(URLRequest(url: url))
         }
-        guard let url = URL(string: text) else { return }
-        tab.webView.load(URLRequest(url: url))
-        window.makeFirstResponder(tab.webView)
-    }
+        record.refreshTitle()
 
-    // MARK: Tabs
-
-    @objc func newTabAction(_ sender: Any?) {
-        addTab(url: currentProfileURL(), select: true)
+        if select, let key = currentTab?.window ?? tabs.first?.window {
+            if key !== window, tabs.count > 1 {
+                key.addTabbedWindow(window, ordered: .above)
+            }
+            window.makeKeyAndOrderFront(nil)
+        }
+        saveState()
+        return record
     }
 
     @objc func closeTabAction(_ sender: Any?) {
@@ -289,168 +320,200 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSToolbarDelegate, NST
     }
 
     func closeTab(record: TabRecord) {
-        let wasOnly = tabs.count == 1
-        suppressTabSelect = true
-        if let idx = tabs.firstIndex(where: { $0 === record }) {
+        let willBeEmpty = tabs.count == 1
+        record.observationTokens.forEach { $0.invalidate() }
+        if let idx = tabs.firstIndex(where: { $0.id == record.id }) {
             tabs.remove(at: idx)
         }
-        if let item = tabView.tabViewItems.first(where: { $0 === record.tabItem }) {
-            tabView.removeTabViewItem(item)
-        }
-        suppressTabSelect = false
-        if wasOnly {
-            addTab(url: currentProfileURL(), select: true)
-        }
-        saveState()
-        refreshChrome()
-    }
-
-    @discardableResult
-    func addTab(url: URL?, select: Bool) -> TabRecord {
-        let config = WKWebViewConfiguration()
-        config.websiteDataStore = .default()
-        if let effortScript = EffortControlScript.makeUserScript() {
-            config.userContentController.addUserScript(effortScript)
-        }
-        let webView = WKWebView(frame: tabView.bounds, configuration: config)
-        webView.autoresizingMask = [.width, .height]
-        webView.navigationDelegate = self
-        webView.uiDelegate = self
-        webView.allowsBackForwardNavigationGestures = true
-        webView.configuration.preferences.isElementFullscreenEnabled = true
-
-        let tabItem = NSTabViewItem(identifier: UUID().uuidString)
-        tabItem.view = webView
-        tabItem.label = "New Tab"
-        tabView.addTabViewItem(tabItem)
-
-        let record = TabRecord(webView: webView, tabItem: tabItem)
-        tabs.append(record)
-
-        record.observationTokens.append(webView.observe(\.url, options: [.new, .initial]) { [weak self] wv, _ in
-            DispatchQueue.main.async { self?.tabURLChanged(record, webView: wv) }
-        })
-        record.observationTokens.append(webView.observe(\.title, options: [.new, .initial]) { [weak self] wv, _ in
-            DispatchQueue.main.async { self?.tabTitleChanged(record, webView: wv) }
-        })
-        record.observationTokens.append(webView.observe(\.isLoading, options: [.new]) { [weak self] _, _ in
-            DispatchQueue.main.async { self?.saveState() }
-        })
-
-        if let url = url {
-            webView.load(URLRequest(url: url))
-        }
-        if select {
-            tabView.selectTabViewItem(tabItem)
+        record.window.orderOut(nil)
+        record.window.close()
+        if willBeEmpty {
+            _ = addTab(url: urlForNewTab(), name: nil, select: true)
+            return
         }
         saveState()
-        return record
     }
 
-    func tabURLChanged(_ record: TabRecord, webView: WKWebView) {
-        guard let url = webView.url else { return }
-        let host = url.host ?? url.absoluteString
-        // Label by profile name if the URL matches one, else by host.
-        let profiles = ProfileStore.shared.profiles
-        var label = host
-        for (idx, p) in profiles.enumerated() {
-            if let purl = URL(string: p.url), sameOrigin(purl, url) {
-                label = p.name
-                if !suppressTabSelect { break }
-                _ = idx
+    // NSWindowDelegate: window closed via traffic light or ⌘W
+    func windowWillClose(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow else { return }
+        guard let record = tabs.first(where: { $0.window === window }) else { return }
+        let willBeEmpty = tabs.count == 1
+        record.observationTokens.forEach { $0.invalidate() }
+        if let idx = tabs.firstIndex(where: { $0.id == record.id }) {
+            tabs.remove(at: idx)
+        }
+        if willBeEmpty {
+            _ = addTab(url: urlForNewTab(), name: nil, select: true)
+        } else {
+            saveState()
+        }
+    }
+
+    func windowDidMove(_ notification: Notification) { persistFrame() }
+    func windowDidResize(_ notification: Notification) { persistFrame(); saveState() }
+    func windowDidBecomeKey(_ notification: Notification) { saveState() }
+
+    // MARK: rename sheet
+
+    @objc func renameTabAction(_ sender: Any?) {
+        guard let record = currentTab else { return }
+        let alert = NSAlert()
+        alert.messageText = "Rename Tab"
+        alert.informativeText = "This name appears on the tab and stays after relaunch."
+        alert.addButton(withTitle: "Apply")
+        alert.addButton(withTitle: "Cancel")
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
+        field.stringValue = record.customName ?? record.displayName
+        field.placeholderString = TabRecord.fallbackLabel(for: record.webView.url)
+        alert.accessoryView = field
+        alert.window.initialFirstResponder = field
+        alert.beginSheetModal(for: record.window) { [weak self] response in
+            guard response == .alertFirstButtonReturn else { return }
+            let value = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            record.customName = value.isEmpty ? nil : value
+            record.refreshTitle()
+            self?.saveState()
+        }
+    }
+
+    // MARK: open location sheet
+
+    @objc func selectTabByIndexAction(_ sender: NSMenuItem) {
+        guard let key = currentTab?.window ?? tabs.first?.window,
+              let group = key.tabbedWindows, !group.isEmpty else { return }
+        let idx = sender.tag - 1
+        guard idx >= 0, idx < group.count else { return }
+        group[idx].makeKeyAndOrderFront(nil)
+    }
+
+    @objc func openLocationAction(_ sender: Any?) {
+        guard let record = currentTab else { return }
+        let alert = NSAlert()
+        alert.messageText = "Open Location"
+        alert.informativeText = "Load a URL in the current tab."
+        alert.addButton(withTitle: "Go")
+        alert.addButton(withTitle: "Cancel")
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
+        field.stringValue = record.webView.url?.absoluteString ?? ""
+        field.placeholderString = "https://host:port/"
+        alert.accessoryView = field
+        alert.window.initialFirstResponder = field
+        alert.beginSheetModal(for: record.window) { response in
+            guard response == .alertFirstButtonReturn else { return }
+            var text = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { return }
+            if !text.contains("://") {
+                guard text.contains("."), !text.contains(" ") else { return }
+                text = "https://" + text
             }
-        }
-        record.tabItem.label = label
-        if record === currentTab {
-            if !(window.firstResponder is NSTextField) {
-                addressField?.stringValue = url.absoluteString
-            }
-            window.title = "DSH Shell — \(label)"
+            guard let url = URL(string: text) else { return }
+            record.webView.load(URLRequest(url: url))
         }
     }
 
-    func tabTitleChanged(_ record: TabRecord, webView: WKWebView) {
-        let t = webView.title ?? ""
-        guard !t.isEmpty else { return }
-        record.tabItem.label = String(t.prefix(28))
-    }
-
-    func sameOrigin(_ a: URL, _ b: URL) -> Bool {
-        (a.scheme ?? "") == (b.scheme ?? "") && (a.host ?? "") == (b.host ?? "") && (a.port ?? 80) == (b.port ?? 80)
-    }
-
-    // MARK: NSTabViewDelegate
-
-    func tabView(_ tabView: NSTabView, didSelect tabViewItem: NSTabViewItem?) {
-        guard !suppressTabSelect else { return }
-        refreshChrome()
-        saveState()
-    }
-
-    func refreshChrome() {
-        guard let tab = currentTab else { return }
-        let url = tab.webView.url
-        addressField?.stringValue = url?.absoluteString ?? ""
-        window.title = "DSH Shell — \(tab.tabItem.label)"
-    }
-
-    // MARK: WKUIDelegate — open _blank links as new tabs
-
-    func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
-        guard navigationAction.targetFrame == nil else { return nil }
-        let record = addTab(url: navigationAction.request.url, select: true)
-        return record.webView
-    }
-
-    // MARK: State persistence
+    // MARK: state
 
     func saveState() {
-        let urls = tabs.compactMap { $0.webView.url?.absoluteString }
-        UserDefaults.standard.set(urls, forKey: "openTabs")
-        let sel = tabView.tabViewItems.firstIndex(of: tabView.selectedTabViewItem ?? NSTabViewItem()) ?? 0
-        UserDefaults.standard.set(sel, forKey: "activeTab")
+        guard !suppressSave else { return }
+        // Order tabs by the key window's tab group when available.
+        var ordered: [TabRecord] = []
+        if let group = (currentTab?.window ?? tabs.first?.window)?.tabbedWindows {
+            let groupWindows = Set(group.map(ObjectIdentifier.init))
+            ordered = tabs.filter { groupWindows.contains(ObjectIdentifier($0.window)) }
+            ordered.sort { a, b in
+                let ia = group.firstIndex(where: { $0 === a.window }) ?? 0
+                let ib = group.firstIndex(where: { $0 === b.window }) ?? 0
+                return ia < ib
+            }
+            let known = Set(ordered.map(\.id))
+            ordered.append(contentsOf: tabs.filter { !known.contains($0.id) })
+        } else {
+            ordered = tabs
+        }
+        let saved = ordered.map { SavedTab(name: $0.customName, url: $0.webView.url?.absoluteString ?? "") }
+        TabStateStore.shared.save(saved)
+        if let active = currentTab {
+            UserDefaults.standard.set(active.id.uuidString, forKey: "activeTabIdV3")
+        }
     }
 
     func restoreState() {
-        let saved = UserDefaults.standard.stringArray(forKey: "openTabs") ?? []
-        if saved.isEmpty {
-            addTab(url: currentProfileURL(), select: true)
-        } else {
-            for s in saved {
-                addTab(url: URL(string: s), select: false)
-            }
-            let active = UserDefaults.standard.integer(forKey: "activeTab")
-            if active >= 0, active < tabView.tabViewItems.count {
-                suppressTabSelect = true
-                tabView.selectTabViewItem(at: active)
-                suppressTabSelect = false
-            } else if let first = tabView.tabViewItems.first {
-                tabView.selectTabViewItem(first)
+        suppressSave = true
+        defer { suppressSave = false }
+
+        var restored: [SavedTab] = TabStateStore.shared.load()
+
+        if restored.isEmpty {
+            let legacy = UserDefaults.standard.stringArray(forKey: "openTabs") ?? []
+            if !legacy.isEmpty {
+                restored = legacy.map { SavedTab(name: nil, url: $0) }
             }
         }
-        refreshChrome()
+
+        if restored.isEmpty {
+            let url = ProfileStore.shared.profiles.first.flatMap { URL(string: $0.url) }
+            addTab(url: url, name: nil, select: true)
+        } else {
+            for saved in restored {
+                addTab(url: URL(string: saved.url), name: saved.name, select: false)
+            }
+        }
+        saveState()
     }
 
-    // MARK: Profiles manager window
+    // MARK: frame persistence
 
-    var profilesWindow: NSWindow?
-    var profileRows: [(name: NSTextField, url: NSTextField)] = []
+    private func savedFrame() -> NSRect? {
+        guard let s = UserDefaults.standard.string(forKey: "windowFrameV3") else { return nil }
+        let parts = s.split(separator: ",").compactMap { Double($0) }
+        guard parts.count == 4 else { return nil }
+        let screenFrame = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1280, height: 800)
+        var f = NSRect(x: parts[0], y: parts[1], width: parts[2], height: parts[3])
+        guard f.width >= 480, f.height >= 360 else { return nil }
+        // Keep at least partially on screen.
+        if f.maxX < screenFrame.minX + 100 || f.minX > screenFrame.maxX - 100 {
+            f.origin.x = screenFrame.minX + 40
+        }
+        if f.maxY < screenFrame.minY + 100 || f.minY > screenFrame.maxY - 100 {
+            f.origin.y = screenFrame.minY + 40
+        }
+        return f
+    }
 
-    @objc func manageProfilesAction(_ sender: Any?) {
-        if let pw = profilesWindow {
-            pw.makeKeyAndOrderFront(nil)
+    private func persistFrame() {
+        guard let w = currentTab?.window ?? tabs.first?.window else { return }
+        let f = w.frame
+        UserDefaults.standard.set("\(f.origin.x),\(f.origin.y),\(f.width),\(f.height)", forKey: "windowFrameV3")
+    }
+
+    // MARK: WKUIDelegate
+
+    func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+        guard navigationAction.targetFrame == nil else { return nil }
+        let record = addTab(url: navigationAction.request.url, name: nil, select: true)
+        return record.webView
+    }
+
+    // MARK: Settings window
+
+    @objc func openSettingsAction(_ sender: Any?) {
+        NSLog("DSHV3 settings action fired")
+        if let sw = settingsWindow {
+            sw.makeKeyAndOrderFront(nil)
             return
         }
         let w = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 620, height: 420),
+            contentRect: NSRect(x: 0, y: 0, width: 620, height: 470),
             styleMask: [.titled, .closable, .resizable],
             backing: .buffered, defer: false
         )
-        w.title = "Manage Profiles"
+        w.title = "Settings"
         w.isReleasedWhenClosed = false
+        w.tabbingMode = .disallowed
         w.center()
 
-        let content = NSView(frame: NSRect(x: 0, y: 0, width: 620, height: 420))
+        let content = NSView(frame: NSRect(x: 0, y: 0, width: 620, height: 470))
 
         let stack = NSStackView()
         stack.orientation = .vertical
@@ -467,10 +530,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSToolbarDelegate, NST
         scroll.drawsBackground = false
         content.addSubview(scroll)
 
-        let addButton = NSButton(title: "+ Add Profile", target: self, action: #selector(addProfileRow(_:)))
+        let defaultLabel = NSTextField(labelWithString: "New tabs open:")
+        let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 220, height: 24), pullsDown: false)
+        popup.addItems(withTitles: ProfileStore.shared.profiles.map { $0.name })
+        let savedDefault = UserDefaults.standard.string(forKey: "defaultNewTabProfile") ?? ProfileStore.shared.profiles.first?.name
+        if let savedDefault, let idx = ProfileStore.shared.profiles.firstIndex(where: { $0.name == savedDefault }) {
+            popup.selectItem(at: idx)
+        }
+        defaultProfilePopup = popup
+
+        let defaultRow = NSStackView(views: [defaultLabel, popup])
+        defaultRow.orientation = .horizontal
+        defaultRow.spacing = 8
+
+        let addButton = NSButton(title: "+ Add Environment", target: self, action: #selector(addProfileRow(_:)))
         let saveButton = NSButton(title: "Save", target: self, action: #selector(saveProfilesAction(_:)))
         saveButton.keyEquivalent = "\r"
         saveButton.controlSize = .large
+        if #available(macOS 26.0, *) {
+            saveButton.bezelStyle = .glass
+        } else {
+            saveButton.bezelStyle = .push
+        }
 
         let buttonRow = NSStackView(views: [addButton, NSView(), saveButton])
         buttonRow.orientation = .horizontal
@@ -487,8 +568,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSToolbarDelegate, NST
             buttonRow.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -12),
         ])
 
+        stack.addArrangedSubview(defaultRow)
+
         w.contentView = content
-        self.profilesWindow = w
+        self.settingsWindow = w
         self.profileRows = []
         for p in ProfileStore.shared.profiles {
             appendProfileRow(to: stack, name: p.name, url: p.url)
@@ -512,9 +595,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSToolbarDelegate, NST
         stack.addArrangedSubview(row)
         stack.addArrangedSubview(makeSeparator())
 
-        if let pw = profilesWindow {
-            _ = pw // keep reference semantics simple
-        }
         profileRows.append((name: nameField, url: urlField))
 
         nameField.widthAnchor.constraint(equalToConstant: 150).isActive = true
@@ -528,12 +608,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSToolbarDelegate, NST
     }
 
     @objc func addProfileRow(_ sender: Any?) {
-        guard let stack = profilesWindow?.contentView?.subviews.compactMap({ $0 as? NSScrollView }).first?.documentView as? NSStackView else { return }
+        guard let stack = settingsWindow?.contentView?.subviews.compactMap({ $0 as? NSScrollView }).first?.documentView as? NSStackView else { return }
         appendProfileRow(to: stack, name: "", url: "")
     }
 
     @objc func removeProfileRow(_ sender: NSButton) {
-        // Walk up to the row stack containing this button and drop its fields.
         var node: NSView? = sender.superview
         while let v = node, !(v is NSStackView) || (v as? NSStackView)?.orientation != .horizontal {
             node = v.superview
@@ -552,23 +631,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSToolbarDelegate, NST
             let n = row.name.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
             var u = row.url.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !n.isEmpty, !u.isEmpty else { continue }
-            if !u.contains("://") { u = "http://" + u }
+            if !u.contains("://") { u = "https://" + u }
             collected.append(Profile(name: n, url: u))
         }
-        if collected.isEmpty { return }
-        ProfileStore.shared.replace(with: collected)
-        if selectedProfileIndex >= collected.count { selectedProfileIndex = 0 }
-        UserDefaults.standard.set(selectedProfileIndex, forKey: "selectedProfileIndex")
-        rebuildProfilePopup()
-        profilesWindow?.close()
+        if !collected.isEmpty {
+            ProfileStore.shared.replace(with: collected)
+        }
+        if let title = defaultProfilePopup?.titleOfSelectedItem {
+            UserDefaults.standard.set(title, forKey: "defaultNewTabProfile")
+        }
+        for record in tabs {
+            record.refreshTitle()
+        }
+        settingsWindow?.close()
     }
 
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        true
-    }
+    // MARK: helpers
 
-    func applicationWillTerminate(_ notification: Notification) {
-        saveState()
+    static func sameOrigin(_ a: URL, _ b: URL) -> Bool {
+        (a.scheme ?? "") == (b.scheme ?? "") && (a.host ?? "") == (b.host ?? "") && (a.port ?? 80) == (b.port ?? 80)
     }
 }
 

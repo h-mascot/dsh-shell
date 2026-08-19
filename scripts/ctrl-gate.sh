@@ -46,8 +46,8 @@ done
 print "[gate] built plist"
 /usr/bin/plutil -lint "$PLIST"
 [[ "$(/usr/bin/plutil -extract CFBundleIconFile raw -o - "$PLIST")" == "DeepSeek.icns" ]]
-[[ "$(/usr/bin/plutil -extract CFBundleVersion raw -o - "$PLIST")" == "2.0" ]]
-[[ "$(/usr/bin/plutil -extract CFBundleShortVersionString raw -o - "$PLIST")" == "2.0" ]]
+[[ "$(/usr/bin/plutil -extract CFBundleVersion raw -o - "$PLIST")" == "3.0" ]]
+[[ "$(/usr/bin/plutil -extract CFBundleShortVersionString raw -o - "$PLIST")" == "3.0" ]]
 [[ "$(/usr/bin/plutil -extract CFBundleExecutable raw -o - "$PLIST")" == "dsh-shell" ]]
 
 print "[gate] code signature"
