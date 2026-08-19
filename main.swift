@@ -522,19 +522,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         w.tabbingMode = .disallowed
         w.center()
 
-        let content = NSView(frame: NSRect(x: 0, y: 0, width: 620, height: 470))
+        let content = NSView(frame: NSRect(x: 0, y: 0, width: 620, height: 320))
 
         let stack = NSStackView()
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 8
-        stack.edgeInsets = NSEdgeInsets(top: 12, left: 12, bottom: 12, right: 12)
+        stack.spacing = 6
+        stack.edgeInsets = NSEdgeInsets(top: 10, left: 12, bottom: 10, right: 12)
         stack.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(stack)
 
         let scroll = NSScrollView()
         scroll.documentView = stack
         scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        if #available(macOS 26.0, *) {
+            scroll.verticalScroller?.scrollerStyle = .overlay
+        }
         scroll.translatesAutoresizingMaskIntoConstraints = false
         scroll.drawsBackground = false
         content.addSubview(scroll)
@@ -550,24 +554,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
 
         let defaultRow = NSStackView(views: [defaultLabel, popup])
         defaultRow.orientation = .horizontal
-        defaultRow.spacing = 8
+        defaultRow.spacing = 6
 
         // Founder theme toggle: reasoning-effort background imagery (Off=suit,
         // High=mandarin jacket, Max=imperial robe) behind the new-session hero.
         let founderLabel = NSTextField(labelWithString: "Effort background theme:")
         let founderToggle = NSButton(checkboxWithTitle: "Show founder morph", target: self, action: #selector(founderThemeToggled(_:)))
         founderToggle.state = (UserDefaults.standard.object(forKey: EffortControlScript.founderThemeDefaultsKey) as? Bool ?? true) ? .on : .off
-        let founderHint = NSTextField(labelWithString: "Background follows reasoning effort: suit → jacket → imperial robe")
+        let founderHint = NSTextField(labelWithString: "Off=suit · High=jacket · Max=robe")
         founderHint.font = .systemFont(ofSize: 10)
         founderHint.textColor = .secondaryLabelColor
+        founderHint.cell?.truncatesLastVisibleLine = true
+        founderHint.cell?.wraps = false
         let founderRow = NSStackView(views: [founderLabel, founderToggle, founderHint])
         founderRow.orientation = .horizontal
-        founderRow.spacing = 8
+        founderRow.spacing = 6
 
         let addButton = NSButton(title: "+ Add Environment", target: self, action: #selector(addProfileRow(_:)))
         let saveButton = NSButton(title: "Save", target: self, action: #selector(saveProfilesAction(_:)))
         saveButton.keyEquivalent = "\r"
-        saveButton.controlSize = .large
         if #available(macOS 26.0, *) {
             saveButton.bezelStyle = .glass
         } else {
@@ -576,6 +581,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
 
         let buttonRow = NSStackView(views: [addButton, NSView(), saveButton])
         buttonRow.orientation = .horizontal
+        buttonRow.spacing = 6
         buttonRow.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(buttonRow)
 
@@ -583,10 +589,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             scroll.topAnchor.constraint(equalTo: content.topAnchor),
             scroll.leadingAnchor.constraint(equalTo: content.leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: content.trailingAnchor),
-            scroll.bottomAnchor.constraint(equalTo: buttonRow.topAnchor, constant: -8),
+            scroll.bottomAnchor.constraint(equalTo: buttonRow.topAnchor, constant: -6),
             buttonRow.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 12),
             buttonRow.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -12),
-            buttonRow.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -12),
+            buttonRow.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -10),
         ])
 
         stack.addArrangedSubview(defaultRow)
@@ -594,12 +600,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         stack.addArrangedSubview(makeSeparator())
 
         w.contentView = content
+        w.minSize = NSSize(width: 560, height: 200)
         self.settingsWindow = w
         self.profileRows = []
         for p in ProfileStore.shared.profiles {
             appendProfileRow(to: stack, name: p.name, url: p.url)
         }
+        fitSettingsWindow()
         w.makeKeyAndOrderFront(nil)
+    }
+
+    /// Size the settings window to exactly fit its content so nothing scrolls;
+    /// past a sane cap the overlay scroller (auto-hiding) takes over.
+    func fitSettingsWindow() {
+        guard let w = settingsWindow,
+              let scroll = w.contentView?.subviews.compactMap({ $0 as? NSScrollView }).first,
+              let stack = scroll.documentView as? NSStackView else { return }
+        stack.layoutSubtreeIfNeeded()
+        // stack fitting height + button row (~28) + button gap (6) + bottom pad (10) + safety (4)
+        let required = stack.fittingSize.height + 48
+        let cap: CGFloat = 640
+        let target = min(max(required, 200), cap)
+        let delta = target - w.contentView!.frame.height
+        guard abs(delta) > 0.5 else { return }
+        var frame = w.frame
+        frame.origin.y -= delta
+        frame.size.height += delta
+        w.setFrame(frame, display: true)
     }
 
     func appendProfileRow(to stack: NSStackView, name: String, url: String) {
@@ -622,6 +649,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
 
         nameField.widthAnchor.constraint(equalToConstant: 150).isActive = true
         urlField.widthAnchor.constraint(greaterThanOrEqualToConstant: 300).isActive = true
+        // Keep the remove button inside the window: window 620 − content insets
+        // (24) − name (150) − remove (35) − inter-view spacing (3×8) ≈ 387 max
+        // for the URL field; rows are allowed to compress from the old 360.
+        urlField.setContentCompressionResistancePriority(.required, for: .horizontal)
+        urlField.widthAnchor.constraint(lessThanOrEqualToConstant: 387).isActive = true
     }
 
     func makeSeparator() -> NSView {
@@ -651,6 +683,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     @objc func addProfileRow(_ sender: Any?) {
         guard let stack = settingsWindow?.contentView?.subviews.compactMap({ $0 as? NSScrollView }).first?.documentView as? NSStackView else { return }
         appendProfileRow(to: stack, name: "", url: "")
+        fitSettingsWindow()
     }
 
     @objc func removeProfileRow(_ sender: NSButton) {
@@ -664,6 +697,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         let sep = row.superview?.subviews.first { $0 != row && abs($0.frame.minY - row.frame.minY) < 2 && $0 is NSBox }
         row.removeFromSuperview()
         sep?.removeFromSuperview()
+        fitSettingsWindow()
     }
 
     @objc func saveProfilesAction(_ sender: Any?) {
