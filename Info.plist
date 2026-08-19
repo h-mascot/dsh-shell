@@ -9,9 +9,11 @@
 	<key>CFBundleIdentifier</key>
 	<string>ai.heraldlabs.dsh-shell</string>
 	<key>CFBundleVersion</key>
-	<string>1.0</string>
+	<string>2.0</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.0</string>
+	<string>2.0</string>
+	<key>CFBundleIconFile</key>
+	<string>DeepSeek.icns</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleExecutable</key>

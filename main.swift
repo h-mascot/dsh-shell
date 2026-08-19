@@ -309,7 +309,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSToolbarDelegate, NST
     func addTab(url: URL?, select: Bool) -> TabRecord {
         let config = WKWebViewConfiguration()
         config.websiteDataStore = .default()
-        let webView = WKWebView(frame: tabView.bounds)
+        if let effortScript = EffortControlScript.makeUserScript() {
+            config.userContentController.addUserScript(effortScript)
+        }
+        let webView = WKWebView(frame: tabView.bounds, configuration: config)
         webView.autoresizingMask = [.width, .height]
         webView.navigationDelegate = self
         webView.uiDelegate = self
