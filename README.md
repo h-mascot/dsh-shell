@@ -1,24 +1,41 @@
-# DSH Shell v2
+# DSH Shell
 
-Native AppKit/WKWebView shell for DSH with a real Off / High / Max reasoning-effort rail.
+A native macOS shell (Swift + WKWebView) for the **DeepSeek Harness (DSH)** webapp. Wraps the DSH frontend at `http://127.0.0.1:3092/` in a proper Mac app with native tabs, native macOS chrome, and a reasoning-effort rail built into the composer.
 
-## Build and gate
+![DSH Shell v3.1 founder-morph theme](docs/v31-foundermorph-max.png)
 
-From this directory:
+## Features
 
-```sh
-./scripts/build-app.sh
-./scripts/ctrl-gate.sh
+- **Native tab bar** with user-named tabs and Liquid Glass styling (macOS 26+)
+- **Reasoning effort rail** — Off / High / Max slider injected into the composer, wired to the model's reasoning-effort setting
+- **Founder-morph theme** (v3.1) — the background persona transforms with effort level: suited figure in fog (Off) → mandarin-collar jacket (High) → black-and-gold imperial robe (Max), with a 620ms crossfade. Toggle in **Settings → Show founder morph**
+- All injection is done via an audited user script (`Resources/EffortControl.js`) with a bounded DOM fixture test suite
+
+## Install
+
+1. Download `DSH-Shell-v3.1.dmg` from [Releases](../../releases)
+2. Open the DMG and drag **DSH Shell** to `/Applications`
+3. The app is ad-hoc signed (no Developer ID), so on first launch **right-click → Open** to pass Gatekeeper
+
+**Requirement:** the DSH backend webapp must be running at `http://127.0.0.1:3092/`. The shell renders whatever that server serves.
+
+## Build from source
+
+```bash
+git clone https://github.com/henrino3/dsh-shell.git
+cd dsh-shell
+./scripts/build-app.sh          # builds .build/DSH Shell.app
+./scripts/ctrl-gate.sh          # full gate: syntax, build, plist, codesign, DOM fixture
+open ".build/DSH Shell.app"
 ```
 
-The build creates `.build/DSH Shell.app`, compiles `main.swift` and `EffortControlScript.swift` with system `swiftc`, copies `Info.plist` and `Resources/`, and applies an ad-hoc signature. The gate is fail-closed: it checks JavaScript and plist syntax, rebuilds the app, checks the version/icon/resource contract, verifies the signature, and runs `tests/test_effort_control.py` with the installed Python Playwright package.
+## Verification
 
-## Runtime contract
+`./scripts/ctrl-gate.sh` runs: JS syntax check → source plist → full build → bundle resource check → built plist → codesign verification → bounded DOM interaction fixture (Playwright). The gate must pass before any release.
 
-- Each tab gets a `WKWebViewConfiguration` containing `Resources/EffortControl.js` as a document-end, main-frame-only `WKUserScript`.
-- Swift reads `founder-off.png`, `founder-high.png`, and `founder-max.png` from the app bundle, converts them to PNG data URIs, and replaces the script placeholders before injection.
-- The script is inert until `[data-slot="conversation.input.right"]` and `button[aria-label^="Select model"]` exist. It inserts the accessible range rail immediately before that native model trigger.
-- Applying a value opens the native model menu, opens its `Effort` row, and clicks the exact `button[role="menuitemradio"]` named `Off`, `High`, or `Max`. No fetch, WebSocket, or fake backend state is used.
-- The rail reconciles from the native trigger's `reasoning effort Off|High|Max` accessibility label, with a mutation observer and periodic check. Failed application reverts and exposes `Unavailable` through the tooltip and `aria-valuetext`.
-- Founder treatment is limited to a marked New Session hero (`data-dsh-view="new-session"`, equivalent DSH new-session markers, or a root/new-session route without conversation markers). Active conversation views remove it. Off/High force a temporary light theme and Max a temporary dark theme only while the hero is present; the original theme attributes/classes are restored on exit or teardown.
-- The native profile store, tab state, and profile URLs remain unchanged. The shell does not read or modify `~/.dsh/settings.yaml`.
+## Version history
+
+- **3.1** — founder-morph theme + Settings toggle; fix: hero target resolves to the live composer stage (`.wSkVaW_composerSeat`) instead of a 266×56 control strip when no `<main>` landmark exists
+- **3.0** — minimalist redesign: native tabs, user-named sessions, chrome folded into Settings
+- **2.0** — effort dial (Off/High/Max) rail + founder hero
+- **1.0** — initial checkpoint

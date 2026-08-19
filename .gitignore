@@ -1,5 +1,1 @@
 .build/
-tests/screenshots/
-__pycache__/
-*.pyc
-codedb.snapshot
